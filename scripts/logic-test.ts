@@ -170,7 +170,7 @@ const cliStub = {
   worker: { supportsAuto: true, min: 1, max: 8, source: 'help' as const },
   features: {
     gpuEncode: true, browserGpu: true, fastCapture: true, pageSideCompositing: true,
-    lowMemoryMode: true, strictAll: true, hdr: false, segmented: false,
+    lowMemoryMode: true, strictAll: true, hdr: false,
     maxConcurrentRenders: false, browserTimeout: true, framesCacheDir: false
   }
 }

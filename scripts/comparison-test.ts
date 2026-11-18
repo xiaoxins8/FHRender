@@ -49,7 +49,6 @@ const cliWith = (flags: string[]): CliCapabilities => ({
     lowMemoryMode: flags.includes('--low-memory-mode'),
     strictAll: false,
     hdr: false,
-    segmented: false,
     maxConcurrentRenders: false,
     browserTimeout: flags.includes('--browser-timeout'),
     framesCacheDir: false

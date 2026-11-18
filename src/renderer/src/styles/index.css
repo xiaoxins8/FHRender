@@ -29,6 +29,11 @@
   --shadow-md: 0 6px 18px rgba(16, 24, 40, 0.08);
   --radius: 6px;
   --radius-sm: 4px;
+  /* 中性按钮（高级设置里的「清空 / 恢复默认」） */
+  --btn-neutral-bg: #eef0f3;
+  --btn-neutral-hover: #e3e7ec;
+  --btn-neutral-active: #d7dce3;
+  --btn-neutral-border: #d3d9e1;
   /* 与主进程 window-manager.ts 的 TITLEBAR_HEIGHT 保持一致 */
   --titlebar-height: 44px;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
@@ -58,6 +63,10 @@
   --console-bg: #10131a;
   --console-text: #c8d1dc;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --btn-neutral-bg: #30363f;
+  --btn-neutral-hover: #3a414b;
+  --btn-neutral-active: #434b57;
+  --btn-neutral-border: #434b57;
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
@@ -498,6 +507,16 @@ html[data-platform='darwin'] .titlebar-reserve {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/*
+ * 分段控件不能被 field-control 的 stretch 拉满：
+ * 背景只应包住按钮本身。这里兜底直接子项，新增字段忘记套 wrap-row 也不会再铺满。
+ */
+.field-control > .segmented {
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .field-hint {
@@ -4183,4 +4202,155 @@ select.input {
   background: var(--error-soft);
   border: 1px solid var(--error);
   border-radius: var(--radius-sm);
+}
+
+/* ------------------------------- 模态确认框 ------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 20, 28, 0.42);
+  backdrop-filter: blur(2px);
+  animation: modal-fade 120ms ease-out;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 48px rgba(12, 18, 28, 0.28);
+  animation: modal-pop 140ms ease-out;
+}
+
+.modal-head {
+  padding: 16px 18px 0;
+}
+
+.modal-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.modal-body {
+  padding: 10px 18px 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.modal-body p {
+  margin: 0 0 8px;
+}
+
+.modal-body p:last-child {
+  margin-bottom: 0;
+}
+
+.modal-body .modal-hint {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 18px 16px;
+}
+
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ------------------------- 高级设置「清空」按钮 ------------------------- */
+
+.btn-clear {
+  border-radius: 6px;
+  border-color: var(--btn-neutral-border);
+  background: var(--btn-neutral-bg);
+  color: var(--text-secondary);
+  font-weight: 500;
+  padding: 0 12px;
+}
+
+.btn-clear:hover:not(:disabled) {
+  background: var(--btn-neutral-hover);
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.btn-clear:active:not(:disabled) {
+  background: var(--btn-neutral-active);
+  border-color: var(--border-strong);
+  transform: translateY(1px);
+}
+
+/* ---------------------- 渲染完成：打开文件夹按钮 ---------------------- */
+
+.btn-folder {
+  border-radius: 6px;
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0 12px;
+}
+
+.btn-folder:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-folder:active:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+  transform: translateY(1px);
+}
+
+.btn-folder svg {
+  flex: none;
+}
+
+/* ------------------------- 渲染中的真实文件大小 ------------------------- */
+
+.file-size-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.file-size-line .metric-label {
+  color: var(--text-muted);
 }

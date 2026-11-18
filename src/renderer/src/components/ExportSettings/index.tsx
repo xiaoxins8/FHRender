@@ -4,19 +4,22 @@ import {
   QUALITY_OPTIONS,
   RESOLUTION_OPTIONS,
   FORMAT_OPTIONS,
-  isDirectoryFormat
+  isDirectoryFormat,
+  joinPath
 } from '../../services/api'
 import type { ProjectInfo } from '@shared/types/project'
-import type { RenderSettings, FpsMode, VideoFormat } from '@shared/types/render'
+import type { ExportMode, RenderSettings, FpsMode, VideoFormat } from '@shared/types/render'
 
 interface Props {
   settings: RenderSettings
   project: ProjectInfo | null
+  exportMode: ExportMode
   outputDir: string
   outputName: string
   recentOutputDirs: string[]
   disabled?: boolean
   onChange: (patch: Partial<RenderSettings>) => void
+  onExportModeChange: (mode: ExportMode) => void
   onOutputDirChange: (value: string) => void
   onOutputNameChange: (value: string) => void
   onBrowseOutput: () => void
@@ -45,6 +48,9 @@ export function ExportSettings(props: Props): JSX.Element {
   const isDir = isDirectoryFormat(settings.format)
   const ext = EXTENSION_MAP[settings.format]
   const quality = QUALITY_OPTIONS.find((q) => q.value === settings.quality)
+  const projectMode = props.exportMode === 'project'
+  const projectName = project?.name || '项目名'
+  const projectRendersDir = project ? joinPath(project.path, 'renders') : ''
 
   return (
     <Panel title="导出参数" subtitle="参数直接对应 hyperframes render 的真实选项">
@@ -135,55 +141,104 @@ export function ExportSettings(props: Props): JSX.Element {
       <div className="divider" />
 
       <Field
-        label={isDir ? '输出目录名' : '文件名称'}
+        label="导出方式"
         hint={
-          isDir
-            ? '目录型输出会在所选位置下创建同名文件夹'
-            : `扩展名由格式自动决定${ext ? `：${ext}` : ''}`
+          projectMode
+            ? '沿用 HyperFrames 自带的项目 renders 目录，文件名自动带时间戳，不会覆盖旧成片。'
+            : '自己选择输出文件夹与文件名，适合交付到固定目录。'
         }
       >
-        <div className="input-affix">
-          <input
-            className="input"
-            value={props.outputName}
-            placeholder="例如 my-video"
-            onChange={(e) => props.onOutputNameChange(e.target.value)}
+        {/* .field-control 是 flex column，直接放会横向拉伸；套一层 wrap-row 保持控件自身宽度 */}
+        <div className="wrap-row">
+          <Segmented
+            size="sm"
+            value={props.exportMode}
+            options={[
+              { value: 'project', label: '项目目录', disabled: props.disabled },
+              { value: 'custom', label: '指定目录', disabled: props.disabled }
+            ]}
+            onChange={props.onExportModeChange}
           />
-          {ext && <span className="affix">{ext}</span>}
         </div>
       </Field>
 
-      <Field label={isDir ? '输出位置' : '输出文件夹'} hint="会记住上次使用的导出位置">
-        <div className="path-input">
-          <input
-            className="input mono"
-            value={props.outputDir}
-            placeholder={project ? `${project.path}\\renders` : '选择输出文件夹'}
-            onChange={(e) => props.onOutputDirChange(e.target.value)}
-          />
-          <Button onClick={props.onBrowseOutput} disabled={props.disabled}>
-            <span className="btn-icon">
-              <Icon.Folder />
-            </span>
-            浏览
-          </Button>
-        </div>
-        {props.recentOutputDirs.length > 0 && (
-          <div className="recent-chips">
-            {props.recentOutputDirs.slice(0, 3).map((dir) => (
-              <button
-                type="button"
-                key={dir}
-                className="chip chip-quiet"
-                title={dir}
-                onClick={() => props.onOutputDirChange(dir)}
-              >
-                {dir}
-              </button>
-            ))}
+      {projectMode ? (
+        <Field
+          label="输出位置"
+          hint={
+            isDir
+              ? `目录名：${projectName}_日期_时间（PNG 序列 / HLS 不写扩展名）`
+              : `文件名：${projectName}_日期_时间${ext}`
+          }
+        >
+          <div className="path-input">
+            <input
+              className="input mono"
+              value={projectRendersDir}
+              placeholder="选择项目后自动确定"
+              readOnly
+              title={projectRendersDir || '选择项目后自动确定'}
+              onChange={() => undefined}
+            />
           </div>
-        )}
-      </Field>
+          <p className="field-hint">
+            渲染时使用 CLI 默认命名规则；同一秒内重复渲染会自动加 -2 / -3 后缀，不会覆盖已有文件。
+          </p>
+        </Field>
+      ) : (
+        <>
+          <Field
+            label={isDir ? '输出目录名' : '文件名称'}
+            hint={
+              isDir
+                ? '目录型输出会在所选位置下创建同名文件夹'
+                : `扩展名由格式自动决定${ext ? `：${ext}` : ''}`
+            }
+          >
+            <div className="input-affix">
+              <input
+                className="input"
+                value={props.outputName}
+                placeholder="例如 my-video"
+                onChange={(e) => props.onOutputNameChange(e.target.value)}
+              />
+              {ext && <span className="affix">{ext}</span>}
+            </div>
+          </Field>
+
+          <Field label={isDir ? '输出位置' : '输出文件夹'} hint="会记住上次使用的导出位置">
+            <div className="path-input">
+              <input
+                className="input mono"
+                value={props.outputDir}
+                placeholder={project ? `${project.path}\\renders` : '选择输出文件夹'}
+                onChange={(e) => props.onOutputDirChange(e.target.value)}
+              />
+              <Button onClick={props.onBrowseOutput} disabled={props.disabled}>
+                <span className="btn-icon">
+                  <Icon.Folder />
+                </span>
+                浏览
+              </Button>
+            </div>
+            {props.recentOutputDirs.length > 0 && (
+              <div className="recent-chips">
+                {props.recentOutputDirs.slice(0, 3).map((dir) => (
+                  <button
+                    type="button"
+                    key={dir}
+                    className="chip chip-quiet"
+                    title={dir}
+                    onClick={() => props.onOutputDirChange(dir)}
+                  >
+                    {dir}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Field>
+        </>
+      )}
 
       {settings.format === 'mov' && (
         <div className="alert alert-info">

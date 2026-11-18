@@ -378,12 +378,28 @@ export function Performance(props: PerformanceProps): JSX.Element {
     if (!recommendation || !settings) return
     setApplying(true)
     try {
-      const merged: RenderSettings = { ...settings, ...recommendation.settingsPatch }
+      /*
+       * 以磁盘上的最新设置为基准合并：性能页可能开着很久，
+       * 直接用组件里的旧快照会把渲染页刚改的开关（尤其 GPU）覆盖掉。
+       */
+      const stored = await api().settings.get()
+      const base = stored.lastSettings ?? settings
+      const merged: RenderSettings = { ...base, ...recommendation.settingsPatch }
+      /*
+       * 「用户请求开启 GPU 编码」和「硬件编码是否可用」是两件事：
+       * 推荐结果因 NVENC 不可用给出 gpu=false 时，不静默清掉用户已经打开的开关。
+       */
+      const keptGpu = base.gpu === true && recommendation.settingsPatch.gpu === false
+      if (keptGpu) merged.gpu = true
       await api().settings.update({ lastSettings: merged })
       setSettings(merged)
       const latest = await api().performance.optimize({ mode, projectPath, settings: merged })
       setRecommendation(latest)
-      showToast('已应用到渲染参数，返回「渲染」页即可使用')
+      showToast(
+        keptGpu
+          ? '已应用到渲染参数；GPU 编码保持开启，硬件不可用时 CLI 会回退 CPU 并记录原因'
+          : '已应用到渲染参数，返回「渲染」页即可使用'
+      )
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'error')
     } finally {

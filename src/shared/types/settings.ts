@@ -1,4 +1,4 @@
-import type { RenderSettings } from './render'
+import type { ExportMode, RenderSettings } from './render'
 import type { PerformanceMode } from './performance'
 
 /** 导出参数预设（只保存在应用数据目录，不写入项目） */
@@ -20,11 +20,23 @@ export interface PresetSaveInput {
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
+/** 主进程解析出的真实路径（只读，不写入设置文件） */
+export interface AppPaths {
+  /** HyperFrames 默认的提取帧缓存目录 */
+  frameCacheDir: string
+  /** 系统临时目录（磁盘捕获 workDir 的根） */
+  tempRoot: string
+  /** 默认值的来源说明 */
+  frameCacheSource: string
+}
+
 export interface AppSettings {
   theme: ThemeMode
   recentProjects: { path: string; name: string; openedAt: string }[]
   recentOutputDirs: string[]
   lastOutputDir: string
+  /** 导出位置模式：项目目录（CLI 默认 renders）或指定目录 */
+  exportMode: ExportMode
   /** 记住上次使用的渲染参数 */
   lastSettings: RenderSettings | null
   lastComposition: string
@@ -37,8 +49,9 @@ export interface AppSettings {
   /** 极限模式下是否允许尝试实验性加速开关 */
   allowExperimental: boolean
   /**
-   * 渲染临时帧（磁盘捕获）的存储目录。
-   * 空字符串 = 跟随系统临时目录（Windows 下即 %TEMP%）。
+   * 帧缓存目录（对应 CLI 的 --frames-cache-dir）。
+   * 空字符串 = 使用 HyperFrames 默认值 `<tmpdir>/hyperframes-extract-cache-<uid>`。
+   * 自定义时同时作为子进程的 TEMP / TMP 根目录（磁盘捕获的 workDir 也落在同一盘）。
    */
   scratchDir: string
   /** 系统临时目录剩余空间不足时，自动切换到空间更充裕的暂存盘 */

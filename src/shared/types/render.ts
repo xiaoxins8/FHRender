@@ -81,10 +81,15 @@ export interface ProjectMeta {
 }
 
 /** 一次完整的渲染请求 */
+/** 导出位置模式：项目目录（CLI 默认 renders）/ 指定目录 */
+export type ExportMode = 'project' | 'custom'
+
 export interface RenderRequest extends RenderSettings {
   projectPath: string
   /** 相对项目根目录的 composition；空字符串表示使用 index.html */
   composition: string
+  /** 导出模式；未设置时按 custom 处理，兼容旧任务记录 */
+  outputMode?: ExportMode
   outputDir: string
   /** 文件名主体（不含扩展名） */
   outputName: string
@@ -160,6 +165,10 @@ export interface RenderStats {
   durationText?: string
   elapsedText?: string
   summary?: string
+  /** 输出文件 / 目录的实际字节数（渲染中每秒刷新；成功后为最终值） */
+  sizeBytes?: number | null
+  /** 是否已完成写入：只有成功任务且读到实际大小时为 true */
+  sizeFinal?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -273,6 +282,8 @@ export interface RenderTaskState {
 export type RenderEvent =
   | { type: 'task'; task: RenderTaskState }
   | { type: 'logs'; lines: RenderLogLine[] }
+  /** 轻量事件：渲染中每秒推送一次真实文件大小，避免整份任务状态反复下发 */
+  | { type: 'output-size'; taskId: string; bytes: number | null; final: boolean }
 
 /** 历史渲染记录（保存本次任务真正使用的配置，供「历史渲染记录」查看） */
 export interface RenderHistoryEntry {

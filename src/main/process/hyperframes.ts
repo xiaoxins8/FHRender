@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, promises as fs } from 'node:fs'
-import { delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import type {
   RenderRequest,
   RenderProgress,
@@ -124,6 +124,44 @@ export function resolveOutputPath(outputDir: string, outputName: string, format:
   const cap = formatCapability(format)
   const safeName = sanitizeOutputName(outputName, format)
   return join(resolve(outputDir), `${safeName}${cap.extension}`)
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** CLI 默认命名里的时间戳：YYYY-MM-DD_HH-mm-ss（本地时间） */
+export function projectOutputTimestamp(date = new Date()): string {
+  return (
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` +
+    `_${pad2(date.getHours())}-${pad2(date.getMinutes())}-${pad2(date.getSeconds())}`
+  )
+}
+
+/**
+ * 模拟 HyperFrames 不传 -o 时的默认输出：
+ *   <项目>/renders/<项目名>_<YYYY-MM-DD_HH-mm-ss>[.ext]
+ *
+ * 仍然把结果作为 -o 传给 CLI，这样应用能提前知道真实路径（文件大小 / 通知 / 历史都用它），
+ * 目录和命名规则与 CLI 自带默认完全一致。目录型输出（PNG 序列 / HLS）没有扩展名。
+ */
+export function projectExportPath(
+  projectPath: string,
+  format: VideoFormat,
+  date = new Date()
+): string {
+  const cap = formatCapability(format)
+  const projectName = sanitizeOutputName(basename(resolve(projectPath)), format)
+  const rendersDir = join(resolve(projectPath), 'renders')
+  const stamp = projectOutputTimestamp(date)
+  let candidate = join(rendersDir, `${projectName}_${stamp}${cap.extension}`)
+  let index = 2
+  // 同一秒内重复渲染时避免覆盖已有文件
+  while (existsSync(candidate)) {
+    candidate = join(rendersDir, `${projectName}_${stamp}-${index}${cap.extension}`)
+    index += 1
+  }
+  return candidate
 }
 
 /* ------------------------------------------------------------------ */
@@ -363,7 +401,11 @@ export interface BuiltRenderArgs {
 export function buildRenderArgs(request: RenderRequest, cli?: CliCapabilities): BuiltRenderArgs {
   const cap = formatCapability(request.format)
   const warnings: string[] = []
-  const outputPath = resolveOutputPath(request.outputDir, request.outputName, request.format)
+  const projectMode = request.outputMode === 'project'
+  // 项目目录模式：模拟 CLI 的 renders/<项目名>_<时间戳>；指定目录模式：outputDir + outputName
+  const outputPath = projectMode
+    ? projectExportPath(request.projectPath, request.format)
+    : resolveOutputPath(request.outputDir, request.outputName, request.format)
   const args: string[] = ['render']
 
   args.push('--format', request.format)
@@ -492,6 +534,12 @@ const PROGRESS_CODES: Record<string, string> = {
 
 export interface ParsedLine {
   progress?: RenderProgress
+  /**
+   * 进度来源：
+   * - marker：CLI 的 `@hf-progress` 机器标记（非 TTY 下每个阶段都有，权威）
+   * - bar：人类可读的进度条文本（同一事件的重复输出）
+   */
+  progressSource?: 'marker' | 'bar'
   /** 结果输出路径 */
   outputPath?: string
   stats?: Partial<RenderStats>
@@ -539,6 +587,7 @@ export function parseLine(rawLine: string): ParsedLine {
       const pct = typeof data.pct === 'number' ? Math.min(100, Math.max(0, data.pct)) : null
       if (data.code === 'done') {
         result.progress = { pct: 100, code: 'done', label: '完成' }
+        result.progressSource = 'marker'
       } else if (pct !== null && data.code) {
         result.progress = {
           pct,
@@ -547,6 +596,7 @@ export function parseLine(rawLine: string): ParsedLine {
           done: data.done,
           total: data.total
         }
+        result.progressSource = 'marker'
       }
     } catch {
       /* 忽略解析失败的标记 */
@@ -567,6 +617,7 @@ export function parseLine(rawLine: string): ParsedLine {
       done: frame ? Number(frame[1]) : undefined,
       total: frame ? Number(frame[2]) : undefined
     }
+    result.progressSource = 'bar'
     return result
   }
 

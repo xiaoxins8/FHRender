@@ -23,7 +23,9 @@
     "test:cleanup:e2e": "esbuild scripts/cleanup-e2e.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/cleanup-e2e.cjs --log-level=warning && node .workbuddy/tmp/cleanup-e2e.cjs",
     "test:render-config": "esbuild scripts/render-config-test.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-stub.cjs --outfile=.workbuddy/tmp/render-config-test.cjs --log-level=warning && node .workbuddy/tmp/render-config-test.cjs",
     "test:render-config:e2e": "esbuild scripts/render-config-e2e.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/render-config-e2e.cjs --log-level=warning && node .workbuddy/tmp/render-config-e2e.cjs",
-    "test:preview-state": "esbuild scripts/preview-state-test.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/preview-state-test.cjs --log-level=warning && node .workbuddy/tmp/preview-state-test.cjs"
+    "test:preview-state": "esbuild scripts/preview-state-test.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/preview-state-test.cjs --log-level=warning && node .workbuddy/tmp/preview-state-test.cjs",
+    "test:size:e2e": "esbuild scripts/output-size-e2e.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/output-size-e2e.cjs --log-level=warning && node .workbuddy/tmp/output-size-e2e.cjs",
+    "test:progress:e2e": "esbuild scripts/progress-e2e.ts --bundle --platform=node --target=node20 --format=cjs --alias:electron=./scripts/electron-e2e-stub.cjs --outfile=.workbuddy/tmp/progress-e2e.cjs --log-level=warning && node .workbuddy/tmp/progress-e2e.cjs"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -100,6 +102,14 @@
       "category": "AudioVideo",
       "icon": "build/icon.png",
       "artifactName": "HF-Render-${version}-${arch}.${ext}"
-    }
+    },
+    "protocols": [
+      {
+        "name": "HF Render Reveal",
+        "schemes": [
+          "hfrender"
+        ]
+      }
+    ]
   }
 }

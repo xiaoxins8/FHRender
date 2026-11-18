@@ -9,19 +9,26 @@ import { EnvDialog } from '../../components/EnvDialog'
 import { TitleBar } from '../../components/TitleBar'
 import { PreviewButton } from '../../components/preview/PreviewButton'
 import { PreviewStatus } from '../../components/preview/PreviewStatus'
-import { Button, Icon, Spinner } from '../../components/ui'
+import { Button, ConfirmDialog, Icon, Spinner } from '../../components/ui'
 import { usePreview } from '../../services/use-preview'
 import {
   api,
   buildRequest,
   defaultRenderSettings,
   EXTENSION_MAP,
+  isDirectoryFormat,
   joinPath
 } from '../../services/api'
 import { DEFAULT_SETTINGS } from '../../services/constants'
 import type { ProjectInfo, RecentProject } from '@shared/types/project'
-import type { RenderHistoryEntry, RenderLogLine, RenderSettings, RenderTaskState } from '@shared/types/render'
-import type { AppSettings, EnvironmentReport, RenderPreset } from '@shared/types/settings'
+import type {
+  ExportMode,
+  RenderHistoryEntry,
+  RenderLogLine,
+  RenderSettings,
+  RenderTaskState
+} from '@shared/types/render'
+import type { AppPaths, AppSettings, EnvironmentReport, RenderPreset } from '@shared/types/settings'
 import type { LintResult } from '@shared/ipc'
 import type { PageId } from '../types'
 
@@ -51,6 +58,8 @@ interface BootSnapshot {
   task: RenderTaskState
   /** 上次成功打开的项目，重挂载时先顶上，避免按钮短暂不可用 */
   project: ProjectInfo | null
+  /** 主进程解析的默认路径（切页时直接复用，不重复探测） */
+  paths?: AppPaths
 }
 let bootSnapshot: BootSnapshot | null = null
 
@@ -72,6 +81,9 @@ export function Home(props: HomeProps): JSX.Element {
   const [recent, setRecent] = useState<RecentProject[]>(() => bootSnapshot?.appSettings.recentProjects ?? [])
   const [htmlFiles, setHtmlFiles] = useState<string[]>([])
   const [composition, setComposition] = useState(() => bootSnapshot?.appSettings.lastComposition ?? '')
+  const [exportMode, setExportMode] = useState<ExportMode>(
+    () => bootSnapshot?.appSettings.exportMode ?? 'custom'
+  )
   const [outputDir, setOutputDir] = useState(() => bootSnapshot?.appSettings.lastOutputDir ?? '')
   const [outputName, setOutputName] = useState('')
   const [recentOutputDirs, setRecentOutputDirs] = useState<string[]>(
@@ -88,9 +100,15 @@ export function Home(props: HomeProps): JSX.Element {
   )
   const [autoEnvCheck, setAutoEnvCheck] = useState(() => bootSnapshot?.appSettings.autoEnvCheck ?? true)
   const [scratchDir, setScratchDir] = useState(() => bootSnapshot?.appSettings.scratchDir ?? '')
+  /** HyperFrames 实际生效的默认帧缓存路径（空设置时显示它） */
+  const [frameCacheDefault, setFrameCacheDefault] = useState(
+    () => bootSnapshot?.paths?.frameCacheDir ?? ''
+  )
   const [autoScratch, setAutoScratch] = useState(
     () => bootSnapshot?.appSettings.autoScratch !== false
   )
+  /** 停止渲染的二次确认弹窗 */
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
   const [env, setEnv] = useState<EnvironmentReport | null>(null)
   const [envOpen, setEnvOpen] = useState(false)
   const [envLoading, setEnvLoading] = useState(false)
@@ -118,15 +136,25 @@ export function Home(props: HomeProps): JSX.Element {
 
     const boot = async (): Promise<void> => {
       try {
-        const [appSettings, presetList, state] = await Promise.all([
+        const [appSettings, presetList, state, paths] = await Promise.all([
           api().settings.get(),
           api().presets.list(),
-          api().render.state()
+          api().render.state(),
+          // 主进程已缓存解析结果，这里只是读取，不会重复执行环境检测
+          api().app.paths()
         ])
         if (cancelled) return
 
         appSettingsRef.current = appSettings
-        bootSnapshot = { appSettings, presets: presetList, task: state, project: bootSnapshot?.project ?? null }
+        settingsLoadedRef.current = true
+        bootSnapshot = {
+          appSettings,
+          presets: presetList,
+          task: state,
+          project: bootSnapshot?.project ?? null,
+          paths
+        }
+        setFrameCacheDefault(paths.frameCacheDir)
         setCliCommand(appSettings.cliCommand || DEFAULT_SETTINGS.cliCommand)
         setAutoEnvCheck(appSettings.autoEnvCheck)
         setScratchDir(appSettings.scratchDir ?? '')
@@ -138,6 +166,7 @@ export function Home(props: HomeProps): JSX.Element {
           setSettings(appSettings.lastSettings)
           lastSavedSettingsRef.current = JSON.stringify(appSettings.lastSettings)
         }
+        setExportMode(appSettings.exportMode)
         if (appSettings.lastOutputDir) setOutputDir(appSettings.lastOutputDir)
         if (appSettings.lastComposition) setComposition(appSettings.lastComposition)
         setTask(state)
@@ -178,23 +207,62 @@ export function Home(props: HomeProps): JSX.Element {
   const lastSavedSettingsRef = useRef<string | null>(
     bootSnapshot ? JSON.stringify(bootSnapshot.appSettings.lastSettings) : null
   )
+  const latestSettingsRef = useRef(settings)
+  /** 设置是否已从磁盘读完：读完之前绝不能用界面默认值覆盖存档 */
+  const settingsLoadedRef = useRef(bootSnapshot !== null)
+
+  const persistSettings = useCallback((value: RenderSettings): void => {
+    // 落盘的同时更新 latest 引用：关窗 / 切页时的 flush 不会拿旧值覆盖新值
+    latestSettingsRef.current = value
+    lastSavedSettingsRef.current = JSON.stringify(value)
+    void api()
+      .settings.update({ lastSettings: value })
+      .then((next) => {
+        appSettingsRef.current = next
+        // 同步首屏快照，切页重挂载时立即拿到最新参数
+        if (bootSnapshot) bootSnapshot.appSettings.lastSettings = value
+      })
+      .catch(() => undefined)
+  }, [])
+
+  const flushSettings = useCallback((): void => {
+    if (!settingsLoadedRef.current) return
+    const value = latestSettingsRef.current
+    if (JSON.stringify(value) === lastSavedSettingsRef.current) return
+    persistSettings(value)
+  }, [persistSettings])
+
   useEffect(() => {
+    latestSettingsRef.current = settings
     if (!ready) return
-    const serialized = JSON.stringify(settings)
-    if (serialized === lastSavedSettingsRef.current) return
-    const timer = setTimeout(() => {
-      lastSavedSettingsRef.current = serialized
-      void api()
-        .settings.update({ lastSettings: settings })
-        .then((next) => {
-          appSettingsRef.current = next
-          // 同步首屏快照，切页重挂载时立即拿到最新参数
-          if (bootSnapshot) bootSnapshot.appSettings.lastSettings = settings
-        })
-        .catch(() => undefined)
-    }, 400)
+    if (JSON.stringify(settings) === lastSavedSettingsRef.current) return
+    const timer = setTimeout(flushSettings, 400)
     return () => clearTimeout(timer)
-  }, [settings, ready])
+  }, [settings, ready, flushSettings])
+
+  /*
+   * 切页 / 关窗时把待写入的改动立即落盘。
+   * 以前只 clearTimeout，导致「切完 GPU 开关 400ms 内切走或退出」时改动被丢掉，
+   * 下次启动读回旧值，看起来就是开关自己关了。
+   */
+  useEffect(() => {
+    const onHide = (): void => flushSettings()
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      flushSettings()
+    }
+  }, [flushSettings])
+
+  const handleSettingsChange = (patch: Partial<RenderSettings>): void => {
+    const next = { ...settings, ...patch }
+    setSettings(next)
+    latestSettingsRef.current = next
+    // GPU / 性能开关是显式用户意图：立即落盘，不等防抖
+    if (['gpu', 'browserGpu', 'docker', 'workers'].some((key) => key in patch)) {
+      persistSettings(next)
+    }
+  }
 
   /* --------------------------- 渲染事件 --------------------------- */
 
@@ -209,6 +277,12 @@ export function Home(props: HomeProps): JSX.Element {
           const next = [...prev, ...event.lines]
           return next.length > 6000 ? next.slice(next.length - 6000) : next
         })
+      } else if (event.type === 'output-size') {
+        setTask((prev) =>
+          prev.id !== event.taskId
+            ? prev
+            : { ...prev, stats: { ...prev.stats, sizeBytes: event.bytes, sizeFinal: event.final } }
+        )
       } else if (event.type === 'task') {
         setTask(event.task)
         // 任务结束（成功 / 失败 / 取消）后刷新历史：历史里存的是该任务自己的配置快照
@@ -434,8 +508,10 @@ export function Home(props: HomeProps): JSX.Element {
   const readiness = (): string | null => {
     if (!project) return '请先选择项目目录'
     if (!project.valid && !composition) return '项目缺少 index.html，请在高级参数中指定 composition 文件'
-    if (!outputDir.trim()) return '请选择输出位置'
-    if (!outputName.trim()) return '请填写输出文件名'
+    if (exportMode === 'custom') {
+      if (!outputDir.trim()) return '请选择输出位置'
+      if (!outputName.trim()) return '请填写输出文件名'
+    }
     if (settings.fpsMode === 'custom' && !settings.customFps.trim()) return '请填写自定义帧率'
     return null
   }
@@ -449,7 +525,15 @@ export function Home(props: HomeProps): JSX.Element {
     }
     setStarting(true)
     try {
-      const request = buildRequest(settings, project.path, composition, outputDir.trim(), outputName, project)
+      const request = buildRequest(
+        settings,
+        project.path,
+        composition,
+        outputDir.trim(),
+        outputName,
+        project,
+        exportMode
+      )
       const result = await api().render.start(request)
       if (!result.ok) {
         showToast(result.error ?? '启动渲染失败', 'error')
@@ -476,6 +560,19 @@ export function Home(props: HomeProps): JSX.Element {
       setTimeout(() => setStopping(false), 1200)
     }
   }
+
+  /** 停止前先弹确认框：误点一次会杀掉整棵子进程树，代价很高 */
+  const requestStop = (): void => setStopConfirmOpen(true)
+
+  const confirmStop = (): void => {
+    setStopConfirmOpen(false)
+    void handleStop()
+  }
+
+  // 弹窗打开期间渲染自己跑完了（或别处触发了停止），不留一个无意义的确认框
+  useEffect(() => {
+    if (!busy) setStopConfirmOpen(false)
+  }, [busy])
 
   const handleClearLogs = async (): Promise<void> => {
     await api().render.clearLogs()
@@ -521,20 +618,33 @@ export function Home(props: HomeProps): JSX.Element {
     showToast('预览服务已停止')
   }
 
+  const handleExportModeChange = async (mode: ExportMode): Promise<void> => {
+    if (mode === exportMode) return
+    setExportMode(mode)
+    const next = await api().settings.update({ exportMode: mode })
+    appSettingsRef.current = next
+    if (bootSnapshot) bootSnapshot.appSettings.exportMode = mode
+    showToast(
+      mode === 'project'
+        ? '已切换到项目目录导出：文件保存到项目的 renders 文件夹'
+        : '已切换到指定目录导出'
+    )
+  }
+
   const handlePickScratchDir = async (): Promise<void> => {
-    const dir = await api().dialog.selectDirectory(scratchDir || undefined)
+    const dir = await api().dialog.selectDirectory(scratchDir || frameCacheDefault || undefined)
     if (!dir) return
     const next = await api().settings.update({ scratchDir: dir })
     appSettingsRef.current = next
     setScratchDir(next.scratchDir)
-    showToast('临时帧存储目录已保存')
+    showToast('帧缓存目录已保存')
   }
 
   const handleUseSystemTemp = async (): Promise<void> => {
     const next = await api().settings.update({ scratchDir: '' })
     appSettingsRef.current = next
     setScratchDir('')
-    showToast('已恢复使用系统临时目录')
+    showToast('已恢复 HyperFrames 默认帧缓存目录')
   }
 
   const handleAutoScratchChange = async (checked: boolean): Promise<void> => {
@@ -543,9 +653,15 @@ export function Home(props: HomeProps): JSX.Element {
     setAutoScratch(next.autoScratch !== false)
   }
 
-  const outputPath = outputDir
-    ? joinPath(outputDir.trim(), `${outputName.trim() || 'render'}${EXTENSION_MAP[settings.format]}`)
-    : ''
+  // 项目目录模式展示默认 renders 目录；实际文件名由主进程按 CLI 规则生成
+  const outputPath =
+    exportMode === 'project'
+      ? project
+        ? joinPath(project.path, 'renders')
+        : ''
+      : outputDir
+        ? joinPath(outputDir.trim(), `${outputName.trim() || 'render'}${EXTENSION_MAP[settings.format]}`)
+        : ''
 
   const handleOpenOutput = async (): Promise<void> => {
     const target = task.stats.outputPath ?? outputPath
@@ -561,7 +677,12 @@ export function Home(props: HomeProps): JSX.Element {
     const target = task.stats.outputPath ?? outputPath
     if (!target) return
     try {
-      await api().shell.showItem(target)
+      // 目录型输出（png-sequence / hls）直接打开目录；单文件输出定位到文件
+      if (isDirectoryFormat(task.request?.format ?? settings.format)) {
+        await api().shell.openPath(target)
+      } else {
+        await api().shell.showItem(target)
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 'error')
     }
@@ -672,11 +793,13 @@ export function Home(props: HomeProps): JSX.Element {
           <ExportSettings
             settings={settings}
             project={project}
+            exportMode={exportMode}
             outputDir={outputDir}
             outputName={outputName}
             recentOutputDirs={recentOutputDirs}
             disabled={busy}
-            onChange={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
+            onChange={handleSettingsChange}
+            onExportModeChange={(mode) => void handleExportModeChange(mode)}
             onOutputDirChange={setOutputDir}
             onOutputNameChange={setOutputName}
             onBrowseOutput={() => void handleBrowseOutput()}
@@ -688,7 +811,7 @@ export function Home(props: HomeProps): JSX.Element {
             composition={composition}
             htmlFiles={htmlFiles}
             disabled={busy}
-            onChange={(patch) => setSettings((prev) => ({ ...prev, ...patch }))}
+            onChange={handleSettingsChange}
             onCompositionChange={(next) => void handleCompositionChange(next)}
             onRefreshFiles={() => void handleRefreshFiles()}
             onBrowseComposition={async () => {
@@ -697,6 +820,7 @@ export function Home(props: HomeProps): JSX.Element {
               if (picked) setComposition(picked)
             }}
             scratchDir={scratchDir}
+            scratchDefault={frameCacheDefault}
             autoScratch={autoScratch}
             onPickScratchDir={() => void handlePickScratchDir()}
             onResetScratchDir={() => void handleUseSystemTemp()}
@@ -727,7 +851,7 @@ export function Home(props: HomeProps): JSX.Element {
                 onOpen={() => void handlePreviewOpen()}
               />
               {busy ? (
-                <Button variant="danger" onClick={() => void handleStop()} disabled={stopping}>
+                <Button variant="danger" onClick={requestStop} disabled={stopping}>
                   <span className="btn-icon">
                     <Icon.Stop />
                   </span>
@@ -748,7 +872,7 @@ export function Home(props: HomeProps): JSX.Element {
             task={task}
             history={taskHistory}
             stopping={stopping}
-            onStop={() => void handleStop()}
+            onStop={requestStop}
             onOpenOutput={() => void handleOpenOutput()}
             onRevealOutput={() => void handleRevealOutput()}
           />
@@ -761,6 +885,22 @@ export function Home(props: HomeProps): JSX.Element {
           />
         </aside>
       </div>
+
+      <ConfirmDialog
+        open={stopConfirmOpen}
+        title="确定要停止渲染吗？"
+        confirmText={stopping ? '正在停止…' : '停止渲染'}
+        cancelText="继续渲染"
+        tone="danger"
+        busy={stopping}
+        onCancel={() => {
+          if (!stopping) setStopConfirmOpen(false)
+        }}
+        onConfirm={confirmStop}
+      >
+        <p>停止会立即终止渲染进程树，已经写入的临时文件不会保留。</p>
+        <p className="modal-hint">停止后重新开始会从第 1 帧重新渲染，无法接着上次的进度继续。</p>
+      </ConfirmDialog>
 
       <EnvDialog
         open={envOpen}

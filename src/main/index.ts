@@ -6,6 +6,11 @@ import { SettingsManager } from './services/settings-manager'
 import { EnvironmentService } from './process/environment'
 import { RenderManager } from './process/render-manager'
 import { RenderHistoryManager } from './services/render-history'
+import {
+  extractProtocolUrl,
+  registerNotificationProtocol,
+  RenderNotifier
+} from './services/render-notifier'
 import { PerformanceService } from './services/performance-service'
 import { PreviewManager } from './preview/preview-manager'
 import { WindowManager } from './window/window-manager'
@@ -13,6 +18,8 @@ import { registerIpcHandlers } from './ipc/handlers'
 import { IPC } from '@shared/ipc'
 
 app.setAppUserModelId('com.hfrender.app')
+// 通知按钮走 hfrender:// 协议激活，避免 Windows Toast 启动错误的可执行文件
+registerNotificationProtocol()
 
 const settingsManager = new SettingsManager()
 const getCliCommand = async (): Promise<string> => {
@@ -25,6 +32,8 @@ const presetManager = new PresetManager()
 const environmentService = new EnvironmentService(getCliCommand)
 const renderManager = new RenderManager()
 const renderHistoryManager = new RenderHistoryManager()
+/** 渲染成功后的 Windows 系统通知（同一任务只发一次） */
+const renderNotifier = new RenderNotifier()
 // 任务结束（成功 / 失败 / 取消）都会写入历史：保存的是本次任务真正使用的配置快照
 renderManager.setHistorySink((entry) => renderHistoryManager.save(entry))
 
@@ -48,30 +57,66 @@ projectManager.setMetadataProvider(async (input) => {
   return { metadata: result.metadata, fromCache: result.fromCache }
 })
 
+/** 用户已确认退出：之后不再拦截关闭 / 退出 */
+let exitConfirmed = false
+/** 同一次退出只弹一次确认框（连续点 X、Cmd+Q 与关闭按钮同时触发时） */
+let exitAsking = false
+
 const windowManager = new WindowManager({
   preloadPath: join(__dirname, '../preload/index.js'),
   rendererEntry: join(__dirname, '../renderer/index.html'),
   devUrl: process.env.VITE_DEV_SERVER_URL,
+  /*
+   * 任何退出路径（标题栏 X、Alt+F4、菜单退出、Cmd+Q）都会走到这里：
+   * 统一先弹二次确认，确认后才真正销毁窗口。页面还没加载完时退回原生弹窗，
+   * 避免出现「窗口关不掉」的情况。
+   */
   onBeforeClose: (event) => {
-    if (!renderManager.isBusy()) return
-    const win = windowManager.getWindow()
-    const options: Electron.MessageBoxSyncOptions = {
-      type: 'warning',
-      buttons: ['退出并停止渲染', '取消'],
-      defaultId: 1,
-      cancelId: 1,
-      title: '渲染进行中',
-      message: '当前有渲染任务正在运行，退出会终止该任务。',
-      detail: '确定要退出吗？'
-    }
-    const choice = win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options)
-    if (choice !== 0) {
-      event.preventDefault()
-      return
-    }
-    renderManager.dispose()
+    if (exitConfirmed) return
+    event.preventDefault()
+    void requestExitConfirmation()
   }
 })
+
+/**
+ * 退出前的二次确认。
+ * 优先用应用内弹窗（样式统一、能显示渲染状态），渲染进程不可用时退回原生弹窗。
+ */
+async function requestExitConfirmation(): Promise<void> {
+  if (exitConfirmed || exitAsking) return
+  exitAsking = true
+  try {
+    const pending = windowManager.askExit(renderManager.isBusy())
+    const approved = pending ? await pending : askExitNative()
+    if (!approved) return
+
+    exitConfirmed = true
+    renderManager.dispose()
+    windowManager.closeConfirmed()
+    // macOS 关掉最后一个窗口不会退出应用，需要显式触发 before-quit 的清理流程
+    if (process.platform === 'darwin') app.quit()
+  } finally {
+    exitAsking = false
+  }
+}
+
+/** 渲染进程还没就绪时的兜底：原生确认框 */
+function askExitNative(): boolean {
+  const win = windowManager.getWindow()
+  const options: Electron.MessageBoxSyncOptions = {
+    type: 'question',
+    buttons: ['退出', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '退出 HF Render',
+    message: '确定要退出 HF Render 吗？',
+    detail: renderManager.isBusy()
+      ? '当前有渲染任务正在运行，退出会终止该任务，未完成的进度无法保留。'
+      : '退出后需要重新启动应用。'
+  }
+  const choice = win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options)
+  return choice === 0
+}
 
 /**
  * 预览服务管理器。
@@ -94,7 +139,15 @@ const previewManager = new PreviewManager({
 renderManager.onEvent((event) => {
   const win = windowManager.getWindow()
   if (win && !win.isDestroyed()) win.webContents.send(IPC.renderEvent, event)
+  // 只认任务终态里的真实输出信息；通知内部还会再校验一次文件是否存在 / 大小是否有效
+  if (event.type === 'task') void renderNotifier.notify(event.task)
 })
+
+/** 处理通知按钮带来的 hfrender:// 协议参数（冷启动 / 已有实例都走这里） */
+function handleProtocolArgv(argv: string[]): void {
+  const url = extractProtocolUrl(argv)
+  if (url) void renderNotifier.handleProtocolUrl(url)
+}
 
 performanceService.benchmark.onEvent((event) => {
   const win = windowManager.getWindow()
@@ -155,7 +208,9 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, commandLine) => {
+    // 通知按钮通过协议调起新实例时，先把协议参数交给已有实例处理
+    handleProtocolArgv(commandLine)
     const win = windowManager.getWindow()
     if (!win) return
     if (win.isMinimized()) win.restore()
@@ -164,7 +219,7 @@ if (!gotLock) {
     win.focus()
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     registerIpcHandlers({
       project: projectManager,
       presets: presetManager,
@@ -179,6 +234,8 @@ if (!gotLock) {
     })
     buildMenu()
     windowManager.create()
+    // 冷启动（应用未运行时点击通知按钮）：参数里会带 hfrender://reveal?id=...
+    handleProtocolArgv(process.argv)
 
     /* ---------------- 缓存预热（不阻塞窗口） ---------------- */
     // 1) 轻量版本探测：只跑一次 `hyperframes --version`，版本变化时让 CLI 能力缓存失效
@@ -225,6 +282,12 @@ if (!gotLock) {
     if (process.platform !== 'darwin') app.quit()
   })
 
+  // macOS 协议回调
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    void renderNotifier.handleProtocolUrl(url)
+  })
+
   /**
    * 退出清理：
    * 只停止由当前 HF Render 实例启动的预览服务；
@@ -232,6 +295,15 @@ if (!gotLock) {
    */
   let quitting = false
   app.on('before-quit', (event) => {
+    /*
+     * 菜单退出 / Cmd+Q 不会经过窗口的 close 事件，这里也要过一遍二次确认：
+     * 未确认时中止退出并弹出确认框，确认后才会走到下面的清理流程。
+     */
+    if (!exitConfirmed) {
+      event.preventDefault()
+      void requestExitConfirmation()
+      return
+    }
     if (quitting) return
     event.preventDefault()
     quitting = true

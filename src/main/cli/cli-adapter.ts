@@ -68,7 +68,6 @@ function buildFeatures(flags: Set<string>): CliFeatureMatrix {
     lowMemoryMode: flags.has('--low-memory-mode') || flags.has('--no-low-memory-mode'),
     strictAll: flags.has('--strict-all'),
     hdr: flags.has('--hdr'),
-    segmented: flags.has('--resume') || flags.has('--keep-segments'),
     maxConcurrentRenders: flags.has('--max-concurrent-renders'),
     browserTimeout: flags.has('--browser-timeout'),
     framesCacheDir: flags.has('--frames-cache-dir')
@@ -91,7 +90,6 @@ function emptyCapabilities(command: string, error: string): CliCapabilities {
       lowMemoryMode: false,
       strictAll: false,
       hdr: false,
-      segmented: false,
       maxConcurrentRenders: false,
       browserTimeout: false,
       framesCacheDir: false

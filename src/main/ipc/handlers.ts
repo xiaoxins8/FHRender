@@ -14,6 +14,7 @@ import type { WindowManager } from '../window/window-manager'
 import { buildProjectCheckItem } from '../process/environment'
 import type { RenderRequest, RenderSettings } from '@shared/types/render'
 import type { AppSettings } from '@shared/types/settings'
+import { resolveAppPaths } from '../services/frame-cache'
 import type { BenchmarkStartInput, PerformanceMode } from '@shared/types/performance'
 import type { CacheClearScope } from '@shared/types/cache'
 
@@ -172,6 +173,9 @@ export function registerIpcHandlers(ctx: IpcContext): void {
 
   ipcMain.handle(IPC.settingsGet, async () => ctx.settings.get())
 
+  // 路径只在主进程解析一次并缓存，渲染进程切页时直接复用
+  ipcMain.handle(IPC.appPaths, async () => resolveAppPaths())
+
   ipcMain.handle(IPC.settingsUpdate, async (_event, patch: unknown) => {
     if (typeof patch !== 'object' || patch === null) throw new Error('设置参数无效')
     return ctx.settings.update(patch as Partial<AppSettings>)
@@ -194,12 +198,14 @@ export function registerIpcHandlers(ctx: IpcContext): void {
       performanceMode: settings.performanceMode
     })
     if (result.ok) {
+      // 项目目录模式不覆盖「上次自定义输出目录」，否则用户切回指定目录时旧路径会被清空
+      const rememberOutput = req.outputMode !== 'project' && !!req.outputDir?.trim()
       await ctx.settings.update({
         lastSettings: stripLocation(req),
-        lastOutputDir: req.outputDir,
+        ...(rememberOutput ? { lastOutputDir: req.outputDir } : {}),
         lastComposition: req.composition ?? ''
       })
-      await ctx.settings.rememberOutputDir(req.outputDir)
+      if (rememberOutput) await ctx.settings.rememberOutputDir(req.outputDir)
     }
     return result
   })
@@ -255,6 +261,11 @@ export function registerIpcHandlers(ctx: IpcContext): void {
     node: process.versions.node,
     platform: `${process.platform} ${process.arch}`
   }))
+
+  // 退出确认：渲染进程弹窗里的「退出 / 取消」回传到这里
+  ipcMain.handle(IPC.appCloseConfirm, async (_event, confirmed: unknown) => {
+    ctx.window.resolveExit(confirmed === true)
+  })
 
   /* ------------------------------ 性能 ------------------------------ */
 
@@ -440,9 +451,12 @@ function stripLocation(request: RenderRequest): RenderSettings {
   const {
     projectPath: _projectPath,
     composition: _composition,
+    outputMode: _outputMode,
     outputDir: _outputDir,
     outputName: _outputName,
     projectMeta: _projectMeta,
+    // 只用于本次调用的运行时字段，不应写进「上次使用的参数」
+    env: _env,
     ...rest
   } = request
   return rest

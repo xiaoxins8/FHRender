@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   recentProjects: [],
   recentOutputDirs: [],
   lastOutputDir: '',
+  // 新安装默认使用项目目录；旧存档在 get() 里按 lastOutputDir 迁移
+  exportMode: 'project',
   lastSettings: DEFAULT_RENDER_SETTINGS,
   lastComposition: '',
   autoEnvCheck: true,
@@ -92,6 +94,18 @@ export class SettingsManager {
       lastSettings: data.lastSettings ? normalizeRenderSettings(data.lastSettings) : DEFAULT_RENDER_SETTINGS,
       recentProjects: Array.isArray(data.recentProjects) ? dedupeByPath(data.recentProjects) : [],
       recentOutputDirs: Array.isArray(data.recentOutputDirs) ? data.recentOutputDirs : [],
+      /*
+       * 导出模式迁移：
+       * - 旧存档没有 exportMode，但已经记过自定义输出目录 → 保持 custom，避免升级后忽略用户的旧设置；
+       * - 从没用过自定义目录 → 用更省心的项目目录模式。
+       */
+      exportMode:
+        this.store.wasProvided('exportMode') &&
+        (data.exportMode === 'project' || data.exportMode === 'custom')
+          ? data.exportMode
+          : (data.lastOutputDir ?? '').trim()
+            ? 'custom'
+            : 'project',
       /*
        * 清理开关必须是严格布尔值：
        * 配置文件被手工改坏（null / "false" 字符串）时按默认值处理，

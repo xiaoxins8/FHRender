@@ -1,4 +1,4 @@
-import type { RenderPreset, PresetSaveInput, AppSettings, EnvironmentReport } from './types/settings'
+import type { RenderPreset, PresetSaveInput, AppSettings, AppPaths, EnvironmentReport } from './types/settings'
 import type { ProjectInfo, RecentProject, ProjectScanResult } from './types/project'
 import type {
   BenchmarkEvent,
@@ -65,6 +65,7 @@ export const IPC = {
   openPath: 'shell:open-path',
   showItem: 'shell:show-item',
   appInfo: 'app:info',
+  appPaths: 'app:paths',
   // 性能优化
   perfSnapshot: 'perf:snapshot',
   perfRescan: 'perf:rescan',
@@ -99,7 +100,10 @@ export const IPC = {
   // 窗口（自定义标题栏）
   windowSetTheme: 'window:set-theme',
   windowGetState: 'window:get-state',
-  windowStateEvent: 'window:state-event'
+  windowStateEvent: 'window:state-event',
+  // 退出确认（主进程 → 渲染进程请求，渲染进程 → 主进程回传选择）
+  appCloseRequest: 'app:close-request',
+  appCloseConfirm: 'app:close-confirm'
 } as const
 
 export interface LintFinding {
@@ -170,6 +174,12 @@ export interface HfRenderApi {
   }
   app: {
     info(): Promise<{ version: string; electron: string; node: string; platform: string }>
+    /** 主进程缓存的真实路径（帧缓存默认目录 / 系统临时目录） */
+    paths(): Promise<AppPaths>
+    /** 回传退出确认结果（true = 确认退出） */
+    confirmExit(confirmed: boolean): Promise<void>
+    /** 主进程请求退出确认；rendering 表示当前是否有渲染任务在跑 */
+    onCloseRequest(listener: (payload: { rendering: boolean }) => void): () => void
   }
   performance: {
     snapshot(input: {

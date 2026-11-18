@@ -33,6 +33,10 @@ export class WindowManager {
   private win: BrowserWindow | null = null
   private theme: 'light' | 'dark' = 'light'
   private deps: WindowManagerDeps
+  /** 用户已确认退出：后续 close 事件不再拦截 */
+  private exitAllowed = false
+  /** 退出确认请求的等待者（渲染进程回传结果时兑现） */
+  private exitResolver: ((approved: boolean) => void) | null = null
 
   constructor(deps: WindowManagerDeps) {
     this.deps = deps
@@ -74,6 +78,9 @@ export class WindowManager {
 
     this.win.on('close', (event) => this.deps.onBeforeClose?.(event))
 
+    // 渲染进程已经崩溃时没什么可确认的：直接放行，避免窗口永远关不掉
+    this.win.webContents.on('render-process-gone', () => this.resolveExit(true))
+
     this.win.webContents.setWindowOpenHandler(({ url }) => {
       void (this.deps.onExternalUrl ?? ((target: string) => shell.openExternal(target)))(url)
       return { action: 'deny' }
@@ -97,6 +104,39 @@ export class WindowManager {
 
   getWindow(): BrowserWindow | null {
     return this.win && !this.win.isDestroyed() ? this.win : null
+  }
+
+  /** 是否已确认退出（onBeforeClose 里据此放行） */
+  isExitAllowed(): boolean {
+    return this.exitAllowed
+  }
+
+  /**
+   * 请求渲染进程弹出退出确认框。
+   *
+   * 返回 null 表示页面尚不可用（启动阶段还没加载完、渲染进程已崩溃），
+   * 调用方应退回原生弹窗 —— 绝不能让用户遇到「点了关闭却毫无反应」的窗口。
+   */
+  askExit(rendering: boolean): Promise<boolean> | null {
+    const win = this.getWindow()
+    if (!win || win.webContents.isDestroyed() || win.webContents.isLoadingMainFrame()) return null
+    return new Promise<boolean>((resolve) => {
+      this.exitResolver = resolve
+      win.webContents.send(IPC.appCloseRequest, { rendering })
+    })
+  }
+
+  /** 渲染进程回传用户选择（true = 确认退出） */
+  resolveExit(approved: boolean): void {
+    const resolve = this.exitResolver
+    this.exitResolver = null
+    resolve?.(approved)
+  }
+
+  /** 确认退出：放行 close 并关闭窗口 */
+  closeConfirmed(): void {
+    this.exitAllowed = true
+    this.getWindow()?.close()
   }
 
   /** 只显示一次，避免重复 show 抢焦点 */

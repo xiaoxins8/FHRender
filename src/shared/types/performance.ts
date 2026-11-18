@@ -118,7 +118,6 @@ export interface CliFeatureMatrix {
   lowMemoryMode: boolean
   strictAll: boolean
   hdr: boolean
-  segmented: boolean
   maxConcurrentRenders: boolean
   browserTimeout: boolean
   framesCacheDir: boolean

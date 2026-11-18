@@ -49,6 +49,20 @@ function etaText(task: RenderTaskState, eta: EtaState | null, busy: boolean): st
   return `预计剩余 ${formatDuration(eta.etaMs)}`
 }
 
+/** 字节数 → 人读大小（只用真实文件大小，不做任何按进度推算） */
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return '—'
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value.toFixed(index === 0 || value >= 100 ? 0 : 1)} ${units[index]}`
+}
+
 export function RenderProgress(props: Props): JSX.Element {
   const { task } = props
   const [now, setNow] = useState(Date.now())
@@ -110,11 +124,25 @@ export function RenderProgress(props: Props): JSX.Element {
           </span>
         </div>
         <div className="progress-eta-line">
-          {typeof task.progress.done === 'number' && typeof task.progress.total === 'number' && (
-            <span className="progress-frames mono">
-              已完成 {task.progress.done} / {task.progress.total} 帧
-            </span>
-          )}
+          {/*
+           * done/total 的单位随阶段变化：
+           * capture / encode 是帧，start_browsers 是 worker 数，assemble 是秒。
+           * 以前一律写成「帧」，拼接阶段会出现「已完成 0 / 2 帧」这种误导。
+           */}
+          {typeof task.progress.done === 'number' &&
+            typeof task.progress.total === 'number' &&
+            (task.progress.code === 'capture' || task.progress.code === 'encode') && (
+              <span className="progress-frames mono">
+                已完成 {task.progress.done} / {task.progress.total} 帧
+              </span>
+            )}
+          {typeof task.progress.done === 'number' &&
+            task.progress.code === 'start_browsers' &&
+            task.progress.total != null && (
+              <span className="progress-frames mono">
+                浏览器就绪 {task.progress.done} / {task.progress.total}
+              </span>
+            )}
           {showEtaLine && (
             <span className={`eta-remaining mono eta-${eta?.reliability ?? 'unavailable'}`}>
               {etaText(task, eta, busy)}
@@ -149,6 +177,16 @@ export function RenderProgress(props: Props): JSX.Element {
           </div>
         )}
         {eta?.note && <p className="muted-line eta-note">{eta.note}</p>}
+
+        {/* 真实文件大小：每秒从磁盘读取，文件未生成时不显示伪造数字 */}
+        {busy && (
+          <div className="file-size-line">
+            <span className="metric-label">当前文件大小</span>
+            <span className="mono">
+              {task.stats.sizeBytes != null ? `${formatBytes(task.stats.sizeBytes)}（写入中）` : '等待文件生成'}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* 进度条下方：当前渲染性能 / 当前导出配置（数据来自任务配置快照） */}
@@ -166,25 +204,30 @@ export function RenderProgress(props: Props): JSX.Element {
           </span>
           {task.status === 'succeeded' && (
             <span className="output-actions">
-              <Button size="sm" variant="subtle" onClick={props.onRevealOutput}>
-                在文件夹中显示
+              <Button size="sm" variant="primary" className="btn-folder" onClick={props.onRevealOutput}>
+                <Icon.Folder />
+                打开文件夹
               </Button>
               <Button size="sm" variant="subtle" onClick={props.onOpenOutput}>
-                打开
+                打开文件
               </Button>
             </span>
           )}
         </div>
       )}
 
-      {task.status === 'succeeded' && (task.stats.sizeText || task.stats.durationText) && (
-        <div className="result-stats">
-          {task.stats.sizeText && <Badge tone="ok">{task.stats.sizeText}</Badge>}
-          {task.stats.durationText && <Badge tone="info">{task.stats.durationText}</Badge>}
-          {task.stats.elapsedText && <Badge tone="neutral">CLI 用时 {task.stats.elapsedText}</Badge>}
-          {task.outputExists === false && <Badge tone="warn">未找到输出文件</Badge>}
-        </div>
-      )}
+      {task.status === 'succeeded' &&
+        (task.stats.sizeFinal || task.stats.sizeText || task.stats.durationText || task.stats.elapsedText) && (
+          <div className="result-stats">
+            {task.stats.sizeFinal && task.stats.sizeBytes != null && (
+              <Badge tone="ok">最终文件大小 {formatBytes(task.stats.sizeBytes)}</Badge>
+            )}
+            {!task.stats.sizeFinal && task.stats.sizeText && <Badge tone="ok">{task.stats.sizeText}</Badge>}
+            {task.stats.durationText && <Badge tone="info">{task.stats.durationText}</Badge>}
+            {task.stats.elapsedText && <Badge tone="neutral">CLI 用时 {task.stats.elapsedText}</Badge>}
+            {task.outputExists === false && <Badge tone="warn">未找到输出文件</Badge>}
+          </div>
+        )}
 
       {task.status === 'succeeded' && task.eta?.note && (
         <p className="muted-line">{task.eta.note}</p>
@@ -198,7 +241,9 @@ export function RenderProgress(props: Props): JSX.Element {
       )}
 
       {task.status === 'canceled' && (
-        <div className="alert alert-warn">任务已被停止，未生成完成文件。相关子进程已一并终止。</div>
+        <div className="alert alert-warn">
+          任务已被停止，未生成完成文件。相关子进程已一并终止，重新渲染将从第 1 帧开始。
+        </div>
       )}
 
       {!task.startedAt && (

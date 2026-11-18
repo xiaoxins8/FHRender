@@ -55,7 +55,15 @@ const api: HfRenderApi & {
     showItem: (path) => ipcRenderer.invoke(IPC.showItem, path)
   },
   app: {
-    info: () => ipcRenderer.invoke(IPC.appInfo)
+    info: () => ipcRenderer.invoke(IPC.appInfo),
+    paths: () => ipcRenderer.invoke(IPC.appPaths),
+    confirmExit: (confirmed) => ipcRenderer.invoke(IPC.appCloseConfirm, confirmed),
+    onCloseRequest: (listener: (payload: { rendering: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { rendering: boolean }): void =>
+        listener(payload)
+      ipcRenderer.on(IPC.appCloseRequest, handler)
+      return () => ipcRenderer.removeListener(IPC.appCloseRequest, handler)
+    }
   },
   performance: {
     snapshot: (input) => ipcRenderer.invoke(IPC.perfSnapshot, input),

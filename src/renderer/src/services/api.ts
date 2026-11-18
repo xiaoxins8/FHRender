@@ -1,5 +1,5 @@
 import type { ProjectInfo } from '@shared/types/project'
-import type { RenderRequest, RenderSettings, VideoFormat } from '@shared/types/render'
+import type { ExportMode, RenderRequest, RenderSettings, VideoFormat } from '@shared/types/render'
 import { DEFAULT_SETTINGS } from './constants'
 
 export const api = () => window.hf
@@ -44,12 +44,14 @@ export function buildRequest(
   composition: string,
   outputDir: string,
   outputName: string,
-  project?: ProjectInfo | null
+  project?: ProjectInfo | null,
+  outputMode: ExportMode = 'custom'
 ): RenderRequest {
   return {
     ...settings,
     projectPath,
     composition,
+    outputMode,
     outputDir,
     outputName: outputName.trim(),
     // 原始宽高 / 时长 / 帧率只用于主进程预估帧数与临时空间，不会传给命令行

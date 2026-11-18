@@ -5,10 +5,12 @@ import { dirname, join } from 'node:path'
 /**
  * 极简 JSON 持久化：存放在 Electron userData 目录，绝不写入用户项目目录。
  */
-export class JsonStore<T> {
+export class JsonStore<T extends object> {
   private readonly file: string
   private readonly defaults: T
   private cache: T | null = null
+  /** 磁盘上真实出现过的键：用于区分「用户显式设置」与「默认值补全」 */
+  private rawKeys: Set<string> | null = null
 
   constructor(fileName: string, defaults: T) {
     this.file = join(app.getPath('userData'), fileName)
@@ -24,15 +26,23 @@ export class JsonStore<T> {
     try {
       const raw = await fs.readFile(this.file, 'utf-8')
       const parsed = JSON.parse(raw) as Partial<T>
+      this.rawKeys = new Set(Object.keys(parsed))
       this.cache = { ...this.defaults, ...parsed }
     } catch {
+      this.rawKeys = new Set()
       this.cache = { ...this.defaults }
     }
     return this.cache
   }
 
+  /** 该键是否真的写在磁盘文件里（而不是由 defaults 补出来的） */
+  wasProvided(key: keyof T & string): boolean {
+    return this.rawKeys?.has(key) ?? false
+  }
+
   async write(value: T): Promise<T> {
     this.cache = value
+    this.rawKeys = new Set(Object.keys(value))
     await fs.mkdir(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp`
     const payload = JSON.stringify(value, null, 2)

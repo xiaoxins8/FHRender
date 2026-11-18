@@ -15,8 +15,10 @@ interface Props {
   onCompositionChange: (value: string) => void
   onRefreshFiles: () => void
   onBrowseComposition: () => void
-  /** 临时帧存储目录（空 = 系统临时目录） */
+  /** 自定义帧缓存目录（空 = 使用 HyperFrames 默认目录） */
   scratchDir: string
+  /** HyperFrames 实际生效的默认帧缓存目录（主进程解析，已缓存） */
+  scratchDefault: string
   /** 系统盘空间不足时是否自动切换暂存盘 */
   autoScratch: boolean
   onPickScratchDir: () => void
@@ -25,6 +27,7 @@ interface Props {
 }
 
 const CRF_FORMATS = ['mp4', 'webm']
+
 /** mp4 / mov 在 workers = 1 时走流式编码，不会把每一帧写盘 */
 const STREAMING_FORMATS = ['mp4', 'mov']
 
@@ -149,7 +152,9 @@ export function AdvancedSettings(props: Props): JSX.Element {
               label="GPU 编码"
               description={
                 supportsGpu
-                  ? '对应 --gpu，使用 NVENC / VideoToolbox 等硬件编码器'
+                  ? settings.gpu
+                    ? '已请求 GPU 编码（--gpu）。实际是否用上 NVENC 由 CLI 与硬件决定；初始化失败会回退 CPU，但不会关闭这个设置'
+                    : '对应 --gpu，使用 NVENC / VideoToolbox 等硬件编码器'
                   : `${settings.format.toUpperCase()} 输出不支持 GPU 编码`
               }
               checked={settings.gpu}
@@ -159,16 +164,18 @@ export function AdvancedSettings(props: Props): JSX.Element {
           </div>
 
           <Field label="Browser GPU" hint="控制 Chrome / WebGL 捕获时的 GPU 加速，自动模式会先探测再回退软件渲染">
-            <Segmented
-              size="sm"
-              value={settings.browserGpu}
-              options={[
-                { value: 'auto', label: '自动', title: '--browser-gpu 默认（探测后回退）' },
-                { value: 'on', label: '强制开启', title: '--browser-gpu' },
-                { value: 'off', label: '强制关闭', title: '--no-browser-gpu（SwiftShader）' }
-              ]}
-              onChange={(value) => props.onChange({ browserGpu: value })}
-            />
+            <div className="wrap-row">
+              <Segmented
+                size="sm"
+                value={settings.browserGpu}
+                options={[
+                  { value: 'auto', label: '自动', title: '--browser-gpu 默认（探测后回退）' },
+                  { value: 'on', label: '强制开启', title: '--browser-gpu' },
+                  { value: 'off', label: '强制关闭', title: '--no-browser-gpu（SwiftShader）' }
+                ]}
+                onChange={(value) => props.onChange({ browserGpu: value })}
+              />
+            </div>
           </Field>
 
           <div className="field-grid">
@@ -238,6 +245,7 @@ export function AdvancedSettings(props: Props): JSX.Element {
               <Button
                 size="sm"
                 variant="subtle"
+                className="btn-clear"
                 onClick={() => commitNavTimeout('')}
                 disabled={navTimeout == null && navDraft === ''}
                 title="清空，使用 CLI 默认 60s"
@@ -324,29 +332,36 @@ export function AdvancedSettings(props: Props): JSX.Element {
           <div className="divider" />
 
           <Field
-            label="临时帧存储目录"
-            hint="磁盘捕获会把每一帧先写到临时目录（Windows 固定为系统盘的 os.tmpdir）。空间不足时改到剩余更多的分区，可避免 “Disk capture may need …” 失败。"
+            label="帧缓存目录"
+            hint={
+              props.scratchDir
+                ? '自定义目录：保存后长期有效。渲染时通过 --frames-cache-dir 下发，界面显示的路径就是 CLI 实际使用的路径。'
+                : props.scratchDefault
+                  ? '当前使用 HyperFrames 实际生效的默认缓存目录（磁盘捕获的临时文件也落在同一系统临时目录下）。'
+                  : '正在读取 HyperFrames 默认缓存目录…'
+            }
           >
             <div className="path-input">
               <input
                 className="input mono"
-                value={props.scratchDir}
-                placeholder="系统临时目录（默认）"
+                value={props.scratchDir || props.scratchDefault}
+                placeholder={props.scratchDefault ? '' : '正在读取 HyperFrames 默认路径…'}
                 readOnly
-                title={props.scratchDir || '系统临时目录'}
+                title={props.scratchDir || props.scratchDefault || '读取中'}
                 onChange={() => undefined}
               />
-              <Button size="sm" onClick={props.onPickScratchDir} title="选择临时帧存放目录">
+              <Button size="sm" onClick={props.onPickScratchDir} title="选择帧缓存存放目录">
                 选择目录
               </Button>
               <Button
                 size="sm"
                 variant="subtle"
+                className="btn-clear"
                 onClick={props.onResetScratchDir}
                 disabled={!props.scratchDir}
-                title="恢复为系统临时目录"
+                title="恢复 HyperFrames 实际默认缓存目录"
               >
-                清空
+                恢复默认
               </Button>
             </div>
           </Field>

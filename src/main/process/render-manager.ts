@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { effectiveFramesCacheDir } from '../services/frame-cache'
 import { promises as fs, existsSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -16,21 +17,25 @@ import type {
   RenderEvent,
   RenderHistoryEntry,
   RenderLogLine,
+  RenderProgress,
   RenderRequest,
   RenderSettings,
   RenderStartResult,
   RenderTaskConfigSnapshot,
   RenderTaskState,
   StoppedResult,
+  VideoFormat,
   LogLevel,
   LogStream
 } from '@shared/types/render'
 import { DEFAULT_EXTRA_OPTIONS } from '@shared/types/render'
 import type { FallbackContext } from '../fallback/fallback-manager'
 import type { CliCapabilities, PerformanceMode } from '@shared/types/performance'
+
 import { cleanupStrayBrowsers } from './stray-browsers'
 import { describeBudget, planDiskBudget } from './disk-budget'
 import { RenderEtaEstimator } from './eta-estimator'
+import { measureOutputSize } from './output-size'
 import { describeEncoder, probeOutputMedia, startEncoderWatch, type EncoderWatchHandle } from './encoder-probe'
 import {
   applyBrowserGpuEvidence,
@@ -165,6 +170,11 @@ export class RenderManager {
   private historySink: ((entry: RenderHistoryEntry) => Promise<void>) | null = null
   /** 动态 ETA 估算器（每次启动 / 重试时重置） */
   private eta = new RenderEtaEstimator()
+  /** 渲染中每秒读取一次输出文件真实大小 */
+  private sizeTimer: NodeJS.Timeout | null = null
+  private lastSizeBytes: number | null = null
+  /** 是否已经见过 `@hf-progress` 机器标记（见过之后忽略重复的人类进度条） */
+  private sawMachineProgress = false
 
   /** 注入历史记录存储器 */
   setHistorySink(sink: (entry: RenderHistoryEntry) => Promise<void>): void {
@@ -285,6 +295,18 @@ export class RenderManager {
 
       const cli = this.cliProvider ? await this.cliProvider().catch(() => null) : null
       const { args, outputPath, warnings } = buildRenderArgs(request, cli ?? undefined)
+      /*
+       * 帧缓存目录：界面显示的路径必须就是 CLI 真正使用的路径。
+       * 自定义目录通过 --frames-cache-dir 下发；默认时不下发，CLI 使用它自己的默认值。
+       */
+      const framesCache = effectiveFramesCacheDir(scratch.scratchDir)
+      if (framesCache.custom) {
+        if (cli?.features.framesCacheDir === false) {
+          warnings.push('当前 CLI 未声明 --frames-cache-dir，自定义帧缓存目录本次不会生效')
+        } else {
+          args.push('--frames-cache-dir', framesCache.dir)
+        }
+      }
       const invocation = await buildCliInvocation(args, cliCommand)
 
       /* -------------- 临时磁盘预检（磁盘捕获会把每一帧先落盘） -------------- */
@@ -310,6 +332,7 @@ export class RenderManager {
 
       this.stderrTail = []
       this.recentLines = []
+      this.sawMachineProgress = false
       this.buffers = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }
       if (!isRetry) {
         this.cancelRequested = false
@@ -352,6 +375,10 @@ export class RenderManager {
       if (isRetry) this.pushSystem(`—— 第 ${this.attempt} 次重试 ——`, 'warn')
       this.pushSystem(`项目目录  ${request.projectPath}`)
       this.pushSystem(`输出路径  ${outputPath}`)
+      this.pushSystem(
+        `帧缓存目录  ${framesCache.dir}（${framesCache.custom ? '自定义' : 'CLI 默认'}）`,
+        'debug'
+      )
       this.pushSystem(`执行命令  ${invocation.display}`)
       this.pushSnapshotLogs(config)
       if (invocation.realCommand !== invocation.display) {
@@ -401,6 +428,7 @@ export class RenderManager {
         this.child = null
         this.drainBuffers()
         this.stopEncoderWatch()
+        this.stopSizeWatch()
 
         if (this.flushTimer) {
           clearInterval(this.flushTimer)
@@ -465,6 +493,23 @@ export class RenderManager {
         }
 
         this.startGuard = false
+        /*
+         * 最终文件大小：只在进程退出后读一次磁盘。
+         * 失败 / 停止时保留已写入的字节数，但绝不能标成「最终」。
+         */
+        const measured = await measureOutputSize(finalPath, nextTask.request?.format)
+        if (measured.bytes !== null) {
+          const final = nextTask.status === 'succeeded'
+          nextTask = {
+            ...nextTask,
+            stats: {
+              ...nextTask.stats,
+              sizeBytes: measured.bytes,
+              sizeFinal: final,
+              ...(final ? { sizeText: formatBytesText(measured.bytes) } : {})
+            }
+          }
+        }
         // 先用产出文件校正快照，再写历史（UI / 日志 / 历史共用同一份快照）。
         // 探测是异步的，期间不提交终态，避免界面先看到"完成"但配置还没校正。
         const finalTask = await this.finalizeConfig(nextTask, finalPath)
@@ -492,6 +537,7 @@ export class RenderManager {
       })
 
       this.flushTimer = setInterval(() => this.flushLogs(), FLUSH_INTERVAL)
+      this.startSizeWatch(outputPath, request.format)
 
       this.task = {
         ...this.task,
@@ -686,6 +732,16 @@ export class RenderManager {
       if (probe.available && !probe.ok && probe.error) {
         this.pushSystem(`产出文件探测失败（不影响渲染结果）：${probe.error}`, 'debug')
       }
+      /*
+       * 用户请求 GPU 编码，但实际编码器是 CPU：只提示回退原因，不动用户设置。
+       * 「请求开启」和「硬件编码成功」是两件事，界面上的开关保持用户的选择。
+       */
+      if (task.request?.gpu && next.encoder.hardware === false) {
+        this.pushSystem(
+          'GPU 编码已请求，但本次实际使用 CPU 编码（硬件编码器不可用或初始化失败）；设置保持不变，下次仍会尝试',
+          'warn'
+        )
+      }
     }
 
     if (next.encoder.source === 'none' && format !== 'png-sequence') {
@@ -739,8 +795,11 @@ export class RenderManager {
       return '项目目录缺少 index.html，无法渲染。请在高级设置中指定 composition 文件，或重新选择项目。'
     }
 
-    if (!request.outputDir) return '请选择输出位置'
-    if (!(request.outputName ?? '').trim()) return '请填写输出文件名'
+    // 项目目录模式由 CLI 默认命名；只有指定目录模式才要求手填位置和文件名
+    if (request.outputMode !== 'project') {
+      if (!request.outputDir) return '请选择输出位置'
+      if (!(request.outputName ?? '').trim()) return '请填写输出文件名'
+    }
     if (request.fpsMode === 'custom') {
       const value = (request.customFps ?? '').trim()
       if (!value) return '自定义帧率不能为空'
@@ -841,6 +900,12 @@ export class RenderManager {
     }
   }
 
+  /**
+   * 进度去回退：
+   * - 同一阶段（code + total 相同）的已完成帧只增不减。多 worker 并发渲染时
+   *   各 worker 会交错上报各自的全局帧号，直接采用会看到 34 → 8 → 41。
+   * - 百分比只增不减，阶段切换也不回退。
+   */
   private handleLine(rawLine: string, stream: LogStream): void {
     const parsed = parseLine(rawLine)
     const line = stripAnsi(rawLine).replace(/\r/g, '').trimEnd()
@@ -851,16 +916,26 @@ export class RenderManager {
     }
 
     if (parsed.progress) {
-      const prev = this.task.progress
-      if (
-        prev.pct !== parsed.progress.pct ||
-        prev.label !== parsed.progress.label ||
-        prev.done !== parsed.progress.done
-      ) {
-        this.task = { ...this.task, progress: parsed.progress }
-        // 真实进度驱动动态 ETA；解析失败 / 无依据时 estimator 会给出 estimating 状态
-        this.task = { ...this.task, eta: this.eta.update(parsed.progress) }
-        this.emitTask()
+      /*
+       * CLI 在非 TTY 下会同时打印「人类进度条」和 `@hf-progress` 机器标记。
+       * 两者是同一事件的重复输出，且多 worker 分段渲染时各自的帧号会交错，
+       * 全都采用会让界面在 34/60 → 8/60 之间来回跳。见过机器标记后只信标记。
+       */
+      if (!(parsed.progressSource === 'bar' && this.sawMachineProgress)) {
+        if (parsed.progressSource === 'marker') this.sawMachineProgress = true
+        const next = stabilizeProgress(this.task.progress, parsed.progress)
+        const prev = this.task.progress
+        if (
+          prev.pct !== next.pct ||
+          prev.label !== next.label ||
+          prev.done !== next.done ||
+          prev.code !== next.code
+        ) {
+          this.task = { ...this.task, progress: next }
+          // 真实进度驱动动态 ETA；解析失败 / 无依据时 estimator 会给出 estimating 状态
+          this.task = { ...this.task, eta: this.eta.update(next) }
+          this.emitTask()
+        }
       }
     }
 
@@ -921,6 +996,32 @@ export class RenderManager {
     this.emit({ type: 'logs', lines })
   }
 
+  /* --------------------------- 输出文件大小 --------------------------- */
+
+  /** 渲染中每秒读一次真实字节数；读不到（还没生成 / 被占用）就保持上次的值 */
+  private startSizeWatch(target: string, format?: VideoFormat): void {
+    this.stopSizeWatch()
+    this.lastSizeBytes = null
+    const tick = async (): Promise<void> => {
+      const { bytes } = await measureOutputSize(target, format)
+      if (bytes === null || bytes === this.lastSizeBytes) return
+      this.lastSizeBytes = bytes
+      this.task = {
+        ...this.task,
+        stats: { ...this.task.stats, sizeBytes: bytes, sizeFinal: false }
+      }
+      this.emit({ type: 'output-size', taskId: this.task.id, bytes, final: false })
+    }
+    this.sizeTimer = setInterval(() => void tick(), 1000)
+  }
+
+  private stopSizeWatch(): void {
+    if (this.sizeTimer) {
+      clearInterval(this.sizeTimer)
+      this.sizeTimer = null
+    }
+  }
+
   private emitTask(immediate = false): void {
     if (immediate) {
       this.flushLogs()
@@ -940,6 +1041,7 @@ export class RenderManager {
 
   dispose(): void {
     this.stopEncoderWatch()
+    this.stopSizeWatch()
     if (this.child) {
       this.cancelRequested = true
       killProcessTree(this.child)
@@ -954,8 +1056,38 @@ function outputPathLine(path: string, exists: boolean): string {
   return exists ? `输出文件已生成：${path}` : `渲染结束，但未在预期路径找到输出：${path}`
 }
 
+/**
+ * 进度去回退：同一阶段的已完成帧只增不减，百分比只增不减。
+ * 独立导出便于测试；多 worker 分段渲染的帧号交错是这里的核心场景。
+ */
+export function stabilizeProgress(prev: RenderProgress, incoming: RenderProgress): RenderProgress {
+  const next: RenderProgress = { ...incoming }
+  if (prev.code === next.code && prev.total === next.total) {
+    if (typeof prev.done === 'number' && typeof next.done === 'number') {
+      next.done = Math.max(prev.done, next.done)
+    }
+  }
+  if (typeof prev.pct === 'number' && typeof next.pct === 'number') {
+    next.pct = Math.max(prev.pct, next.pct)
+  }
+  return next
+}
+
+/** 字节数 → 人读大小（与界面显示同一套换算） */
+export function formatBytesText(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value.toFixed(index === 0 || value >= 100 ? 0 : 1)} ${units[index]}`
+}
+
 /** 只允许这些经过确认的官方性能开关透传到渲染进程 */
-const ALLOWED_ENV_KEYS = new Set(['HF_CAPTURE_PARALLEL_STREAM', 'HF_SEGMENTED_CAPTURE'])
+const ALLOWED_ENV_KEYS = new Set(['HF_CAPTURE_PARALLEL_STREAM'])
 
 function pickAllowedEnv(env?: Record<string, string>): Record<string, string> {
   if (!env) return {}

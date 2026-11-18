@@ -14,7 +14,11 @@
  */
 
 import assert from 'node:assert'
-import { buildRenderArgs } from '../src/main/process/hyperframes'
+import { promises as fs } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { buildRenderArgs, parseLine } from '../src/main/process/hyperframes'
+import { stabilizeProgress } from '../src/main/process/render-manager'
 import {
   describeEncoder,
   encoderFromTag,
@@ -38,6 +42,7 @@ import {
 import { RenderHistoryManager } from '../src/main/services/render-history'
 import { checkBrowserTimeout, MIN_BROWSER_TIMEOUT_SEC, sanitizeBrowserTimeout } from '../src/shared/render-limits'
 import { SettingsManager } from '../src/main/services/settings-manager'
+import { buildRequest } from '../src/renderer/src/services/api'
 import type { RenderRequest, RenderSettings } from '../src/shared/types/render'
 import type { RenderHistoryEntry } from '../src/shared/types/render'
 
@@ -497,6 +502,42 @@ async function main(): Promise<void> {
     assert.equal(built.args[idx + 1], '120')
   })
 
+  /* ---------------- 导出位置模式 ---------------- */
+
+  await test('项目目录模式：输出到 <项目>/renders，文件名带 CLI 默认时间戳', () => {
+    const built = buildRenderArgs(
+      makeRequest({ outputMode: 'project', outputDir: '', outputName: '' })
+    )
+    assert.match(
+      built.outputPath,
+      /[\\/]tmp[\\/]project[\\/]renders[\\/]project_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.mp4$/
+    )
+    assert.equal(argValue(built.args, '-o'), built.outputPath)
+  })
+
+  await test('项目目录模式：PNG 序列 / HLS 目录输出不带扩展名', () => {
+    const png = buildRenderArgs(
+      makeRequest({ outputMode: 'project', format: 'png-sequence', outputDir: '', outputName: '' })
+    )
+    assert.match(png.outputPath, /[\\/]renders[\\/]project_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/)
+    assert.equal(png.outputPath.endsWith('.png'), false)
+    const hls = buildRenderArgs(
+      makeRequest({ outputMode: 'project', format: 'hls', outputDir: '', outputName: '' })
+    )
+    assert.match(hls.outputPath, /[\\/]renders[\\/]project_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/)
+  })
+
+  await test('界面 buildRequest 会把导出模式传给主进程', () => {
+    const request = buildRequest(SETTINGS, 'D:/tmp/project', '', 'D:/tmp/out', 'demo', null, 'project')
+    assert.equal(request.outputMode, 'project')
+    assert.equal(buildRequest(SETTINGS, 'D:/tmp/project', '', 'D:/tmp/out', 'demo').outputMode, 'custom')
+  })
+
+  await test('指定目录模式：仍然使用 outputDir + outputName', () => {
+    const built = buildRenderArgs(makeRequest({ outputMode: 'custom' }))
+    assert.match(built.outputPath, /[\\/]tmp[\\/]out[\\/]demo\.mp4$/)
+  })
+
   await test('读取设置时会清掉历史存档里的 1 秒脏值', async () => {
     const manager = new SettingsManager()
     await manager.update({
@@ -510,6 +551,71 @@ async function main(): Promise<void> {
     // 合法值不会被清掉
     await manager.update({ lastSettings: { ...SETTINGS, extra: { ...SETTINGS.extra!, browserTimeoutSec: 120 } } })
     assert.equal((await manager.get()).lastSettings?.extra?.browserTimeoutSec, 120)
+  })
+
+  /* ---------------- 分段 / 多 worker 进度稳定性 ---------------- */
+
+  await test('多 worker 交错上报时，已完成帧不会被较小值覆盖', () => {
+    const next = stabilizeProgress(
+      { pct: 56, code: 'capture', label: '捕获帧', done: 34, total: 60 },
+      { pct: 59, code: 'capture', label: '捕获帧', done: 8, total: 60 }
+    )
+    assert.equal(next.done, 34)
+    assert.equal(next.pct, 59)
+  })
+
+  await test('进度百分比永远不回退', () => {
+    const next = stabilizeProgress(
+      { pct: 75, code: 'capture', label: '捕获帧', done: 54, total: 60 },
+      { pct: 56, code: 'capture', label: '捕获帧', done: 60, total: 60 }
+    )
+    assert.equal(next.pct, 75)
+    assert.equal(next.done, 60)
+  })
+
+  await test('阶段切换时允许 done 重置（拼接阶段 0/2 不受捕获阶段 60 影响）', () => {
+    const next = stabilizeProgress(
+      { pct: 80, code: 'capture', label: '捕获帧', done: 60, total: 60 },
+      { pct: 90, code: 'assemble', label: '合成输出', done: 0, total: 2 }
+    )
+    assert.equal(next.code, 'assemble')
+    assert.equal(next.done, 0)
+    assert.equal(next.pct, 90)
+  })
+
+  await test('进度解析能区分机器标记与人类进度条', () => {
+    const bar = parseLine('  ████████████░░░░░░░░░░░░░  50%  Streaming frame 27/60 (segment 1/2)')
+    assert.equal(bar.progressSource, 'bar')
+    assert.equal(bar.progress?.done, 27)
+    const marker = parseLine('@hf-progress {"code":"capture","done":27,"total":60,"pct":50}')
+    assert.equal(marker.progressSource, 'marker')
+    assert.equal(marker.progress?.label, '捕获帧')
+    assert.equal(marker.progress?.done, 27)
+  })
+
+  await test('导出模式旧设置迁移：显式值优先，否则按是否用过自定义目录判断', async () => {
+    const file = join(tmpdir(), 'hf-render-logic-test', 'settings.json')
+    const backup = await fs.readFile(file, 'utf-8').catch(() => null)
+    try {
+      await fs.mkdir(dirname(file), { recursive: true })
+      await fs.writeFile(
+        file,
+        JSON.stringify({ lastOutputDir: 'D:/custom-output', recentOutputDirs: [] }),
+        'utf-8'
+      )
+      assert.equal((await new SettingsManager().get()).exportMode, 'custom')
+      await fs.writeFile(file, JSON.stringify({ lastOutputDir: '', recentOutputDirs: [] }), 'utf-8')
+      assert.equal((await new SettingsManager().get()).exportMode, 'project')
+      await fs.writeFile(
+        file,
+        JSON.stringify({ lastOutputDir: 'D:/custom-output', exportMode: 'project' }),
+        'utf-8'
+      )
+      assert.equal((await new SettingsManager().get()).exportMode, 'project')
+    } finally {
+      if (backup == null) await fs.rm(file, { force: true })
+      else await fs.writeFile(file, backup, 'utf-8')
+    }
   })
 
   console.log(`\n共 ${passed} 组断言通过${process.exitCode ? '（存在失败项）' : ''}`)

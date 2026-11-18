@@ -1,4 +1,4 @@
-import type { ReactNode, JSX } from 'react'
+import { useEffect, type ReactNode, type JSX } from 'react'
 
 /* ------------------------------- 基础块 ------------------------------- */
 
@@ -120,11 +120,14 @@ export function Button(props: {
   disabled?: boolean
   title?: string
   type?: 'button' | 'submit'
+  className?: string
 }): JSX.Element {
   return (
     <button
       type={props.type ?? 'button'}
-      className={`btn btn-${props.variant ?? 'ghost'} ${props.size === 'sm' ? 'btn-sm' : ''}`}
+      className={`btn btn-${props.variant ?? 'ghost'} ${props.size === 'sm' ? 'btn-sm' : ''} ${
+        props.className ?? ''
+      }`}
       disabled={props.disabled}
       title={props.title}
       onClick={props.onClick}
@@ -166,6 +169,86 @@ export function Empty(props: { text: string; hint?: string }): JSX.Element {
 
 export function Spinner(): JSX.Element {
   return <span className="spinner" aria-hidden />
+}
+
+/**
+ * 模态确认框。
+ *
+ * 用于「停止渲染」这类不可撤销的高风险操作：误点一次就会杀掉整棵子进程树，
+ * 已经渲染的进度也可能白费。遮罩点击与 Esc 都视为取消，只有明确点确认才执行。
+ */
+export function ConfirmDialog(props: {
+  open: boolean
+  title: string
+  children?: ReactNode
+  confirmText?: string
+  cancelText?: string
+  tone?: 'danger' | 'default'
+  busy?: boolean
+  /** 自定义按钮组（超过两个选择时使用；Esc / 遮罩仍然走 onCancel） */
+  actions?: {
+    label: string
+    variant?: 'primary' | 'danger' | 'subtle' | 'ghost'
+    onClick: () => void
+    disabled?: boolean
+  }[]
+  onConfirm: () => void
+  onCancel: () => void
+}): JSX.Element | null {
+  useEffect(() => {
+    if (!props.open) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') props.onCancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [props.open, props.onCancel])
+
+  if (!props.open) return null
+
+  return (
+    <div className="modal-overlay" role="presentation" onClick={props.onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="modal-head">
+          <h3>{props.title}</h3>
+        </header>
+        {props.children && <div className="modal-body">{props.children}</div>}
+        <footer className="modal-actions">
+          {props.actions ? (
+            props.actions.map((action) => (
+              <Button
+                key={action.label}
+                variant={action.variant ?? 'subtle'}
+                onClick={action.onClick}
+                disabled={props.busy || action.disabled}
+              >
+                {action.label}
+              </Button>
+            ))
+          ) : (
+            <>
+              <Button variant="subtle" onClick={props.onCancel} disabled={props.busy}>
+                {props.cancelText ?? '取消'}
+              </Button>
+              <Button
+                variant={props.tone === 'danger' ? 'danger' : 'primary'}
+                onClick={props.onConfirm}
+                disabled={props.busy}
+              >
+                {props.confirmText ?? '确定'}
+              </Button>
+            </>
+          )}
+        </footer>
+      </div>
+    </div>
+  )
 }
 
 /* -------------------------------- 图标 -------------------------------- */
